@@ -432,7 +432,7 @@ if __name__ == '__main__':
 
     steer_compare_results = []
     inner_dict = {}
-    al = 1
+    al = 1.0
     counter = 0
     for k, v in new_dict.items():
         result = get_recs.steer_prompt_compare(
