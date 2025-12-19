@@ -5,120 +5,49 @@ import json
 import torch
 import random
 import os
-from probes import *
+# from probes import *
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
 # torch.set_printoptions(profile="full")
 import re
 import pandas as pd
-from scipy.sparse.linalg import svds
+from data_classes import BookData, MovieData
+import argparse
 
-# pd.set_option('display.max_columns', None)
-
-
-class MappingDicts:
-    def __init__(self, folder):
-        self.user_id_map = pd.read_csv(os.path.join(folder,'user_id_map.csv'))
-        self.book_id_map = pd.read_csv(os.path.join(folder,'book_id_map.csv'))
-        author_gender_df = pd.read_csv(os.path.join(folder, 'final_dataset.csv'))
-        author_gender_df = author_gender_df.set_index('authorid')
-        self.author_gender = author_gender_df[['gender']].to_dict('index')
-        
-        with open(os.path.join(folder,'author_data.json'), 'r') as f:
-            self.author_dict = json.load(f)
-        with open(os.path.join(folder,'book_data.json'), 'r') as f:
-            self.book_dict = json.load(f)
-        
-        self.title_map = {k: v['title_without_series'] for k, v in self.book_dict.items()}
-        self.book_dict_reverse = {v['title']: k for k, v in self.book_dict.items()}
-
-
-class RecData:
-    def __init__(self, foldername, filename='goodreads_samples2.csv'):
-        self.map_dicts = MappingDicts(foldername)
-        self.df = pd.read_csv(os.path.join(foldername,filename))
-
-    def merged(self, lo_rating=4, num_ratings=3, agg=True):
-        merged_df = pd.merge(
-            self.df, 
-            self.map_dicts.book_id_map, 
-            left_on ='book_id',
-            right_on='book_id_csv', 
-            how='left'
-            )
-        totals = merged_df.groupby('user_id')['rating'].agg(lambda x: (x >= lo_rating).sum()).reset_index()
-        totals.columns = ['user_id','rating_count']
-        merged_df2 = pd.merge(
-            merged_df, 
-            totals[totals.rating_count >= num_ratings], 
-            on ='user_id', 
-            how='inner'
-            )
-        if agg:
-            return merged_df2.groupby('user_id')['book_id_y'].agg(list).reset_index()
-        else:
-            return merged_df2
-    
-    def user_title_dict(self, result_df):
-        # Returns a mapping dict with the users total historical titles read and liked 
-        user_title_dict = {}
-        for i, row in result_df.iterrows():
-            user_title_dict[row['user_id']] = [self.map_dicts.book_dict[str(i)]['title_without_series'] for i in row['book_id_y']]
-        return user_title_dict
+# TODO: update build_full_df to include MovieData, change how MF works to pull in
+# loaded model from pickle and individually get scores from that model for
+# each user item pair.
+# TODO: Change output calcs to evaluate ranking by score by user gender
     
 class LLMRecs:
-    def __init__(self, foldername, n):
+    def __init__(self, output_data_path, item_type, n):
         # Load outputs that ran on GPU
-        self.outputs = torch.load(os.path.join(foldername, f'output_dict_{n}.pt'), map_location=torch.device('cpu'))
-        self.map_dicts = MappingDicts(foldername)
-        self.book_dict_reverse = self.map_dicts.book_dict_reverse
+        self.outputs = torch.load(os.path.join(output_data_path, f'output_dict_{item_type}_{n}.pt'), map_location=torch.device('cpu'))
+        
         # Load original recommendation data
-        rec_data = RecData(foldername)
-        
-        result_df = rec_data.merged()
-        self.user_title_dict = rec_data.user_title_dict(result_df)
-        self.str1 = "system\n\nCutting Knowledge Date: December 2023\nToday Date: 08 Nov 2025\n\nuser\n\nHi, I\'ve read and enjoyed the following books:"
-        self.str1b = "Hi, I\'ve read and enjoyed the following books:"
-        self.str2 = """  Only return the 5 books you recommend in JSON format like {"Books": {\'title\':..., \'author\':...}}, and nothing else.assistant\n\n"""
-        self.str3 = """Please recommend new books based on the user\'s reading preferences and only return the 5 books you recommend in JSON format like {"Books": {\'title\':..., \'author\':...}}, and nothing else.assistant"""
-        with open(os.path.join(foldername, f'gender_dict_{n}.json'), 'r') as f:
-            self.gender_dict = json.load(f)
+        if item_type == 'book':
+            rec_data = BookData()
+            self.map_dicts = rec_data.get_map_dicts()
+            self.reverse_title_dict = self.map_dicts.book_dict_reverse
+            result_df = rec_data.merged()
+            self.user_title_dict = rec_data.user_title_dict(result_df)
+            self.str1 = "system\n\nCutting Knowledge Date: December 2023\nToday Date: 08 Nov 2025\n\nuser\n\nHi, I\'ve read and enjoyed the following books:"
+            self.str1b = "Hi, I\'ve read and enjoyed the following books:"
+            # self.str2 = """  Only return the 5 books you recommend in JSON format like {"Books": {\'title\':..., \'author\':...}}, and nothing else.assistant\n\n"""
+            # self.str3 = """Please recommend new books based on the user\'s reading preferences and only return the 5 books you recommend in JSON format like {"Books": {\'title\':..., \'author\':...}}, and nothing else.assistant"""
+            with open(os.path.join(output_data_path, f'gender_dict_{n}.json'), 'r') as f:
+                self.gender_dict = json.load(f)
+            verb = 'read'
+        elif item_type == 'movie':
+            verb = 'watch'
+            rec_data = MovieData()
+            result_df = rec_data.get_rating_df()
+            self.gender_dict = rec_data.get_gender_dict()
+            self.reverse_title_dict = rec_data.get_reverse_title_dict()
 
-    def extract_all_titles(self, text):
-        raw_titles = re.findall(r'"title"\s*:\s*"([^"]+)"', text)
-        cleaned = [t.split(" by ")[0].strip() for t in raw_titles]
-        return cleaned
-    
-    def extract_books(self, entry):
-        # Case 1: structured JSON-like string
-        if isinstance(entry, dict) and "Books" in entry:
-            return entry["Books"]
-        
-        if isinstance(entry, str) and entry.strip().startswith("{"):
-            try:
-                data = json.loads(entry)
-                if "Books" in data:
-                    return data["Books"]
-            except json.JSONDecodeError:
-                pass  # fall through to regex
+        self.str3 = f"Please rank the following {item_type}s in order from most to least likely to recommend to them to {verb} next: "
 
-        # Case 2: free-form text like "Title (Series, #N) by Author"
-        pattern = r"([A-Z][^()]*?(?:\([^)]*\))?\s+by\s+[A-Z][^,\.]+)"
-        matches = re.findall(pattern, entry)
-
-        books = []
-        for m in matches:
-            # Split into title and author
-            title_part, author = m.split(" by ", 1)
-            # try to merge book id in
-            if title_part.strip() in self.book_dict_reverse:
-                book_id = self.book_dict_reverse[title_part.strip()]
-            else:
-                book_id = None
-            books.append({"title": title_part.strip(), "author": author.strip(), "book_id": book_id})
-        
-        return books
     
     def small_dict(self, df=True):
         """ Returns a version of the outputs without the hidden state repr"""
@@ -131,6 +60,13 @@ class LLMRecs:
             return small_df
         else: 
             return small_dict    
+        
+    def extract_titles_to_list(self, text):
+        """ Takes in baseline or steered text and extracts the titles to a list in order of ranking"""
+        if self.item_type == 'book':
+            return re.findall(r'^\s*n?\d+\.\s*(.+?)\s*$', text, re.MULTILINE)
+        elif self.item_type == 'movie':
+            return re.findall(r'\d*\.\s*(.*?)\s*\(\d{4}\)', text)
     
 
     def map_titles(self, df):
@@ -138,10 +74,10 @@ class LLMRecs:
         # for k, values in self.outputs.items():
         for typ in ('baseline', 'steered'):
             df[f'{typ}_recs'] = df[f'{typ}_text'].str.split(self.str3).str[1].str.replace("\n","")
-            df[f'{typ}_titles'] = df[f'{typ}_recs'].apply(self.extract_all_titles)
+            df[f'{typ}_titles'] = df[f'{typ}_recs'].apply(self.extract_titles_to_list)
             df[f'{typ}_ids'] = df[f'{typ}_titles'].apply(
                 lambda x: [
-                    self.book_dict_reverse[item] for item in x if item in self.book_dict_reverse
+                    self.reverse_title_dict[item] for item in x if item in self.reverse_title_dict
                     ]
                 )
         # And for the original sampled books can use either baseline or steered as they have the same starting string
@@ -213,10 +149,13 @@ class LLMRecs:
         """ Append all the variables needed"""
         outputs_df = self.small_dict(df=True)
         # outputs = self.small_dict(df=False)
-        
-        rec_data = RecData('goodreads_data')
-        df = rec_data.merged()
-        mdf = rec_data.merged(agg=False)
+        if self.item_type == 'book':
+            rec_data = BookData()
+            df = rec_data.merged()
+            mdf = rec_data.merged(agg=False)
+
+        elif self.item_type == 'movie':
+            rec_data  = MovieData()
 
         mfrec = MFRec(mdf, 'goodreads_data', False)
         preds_df = mfrec.do_mf()
@@ -232,22 +171,9 @@ class LLMRecs:
 
         return outputs3
     
-    def lookup_mf_scores(self, small_df, preds_df, user_ids_fromdf):
-        # Append MF title scores to each users baseline and steered titles
-        user_id_map_df = pd.DataFrame(user_ids_fromdf, columns=['user_id']).reset_index()
-        user_id_map_df = user_id_map_df.rename(columns={'index':'user_id_from_df'})
-        small_df2 = pd.merge(small_df, user_id_map_df, on='user_id', how='inner')
-        if small_df2.shape[0] < small_df.shape[0]:
-            print('Losing some users', small_df.shape, small_df2.shape)
 
-        for typ in ('baseline','steered'):
-            small_df2[f'mf_{typ}_score_list'] = small_df2.apply(
-                lambda x: [preds_df.iloc[x.user_id_from_df].get(i,np.nan) for i in x[f'{typ}_titles']], 
-                axis=1
-                )
-            small_df2[f'mf_{typ}_score'] = small_df2[f'mf_{typ}_score_list'].apply(np.nansum)
-            small_df2[f'mf_{typ}_denom'] = small_df2[f'mf_{typ}_score_list'].apply(lambda x: np.count_nonzero(~np.isnan(x)))
-        return small_df2
+    def lookup_mf_scores(self):
+        """Use loaded model from pickle """
 
         
     def append_mf_to_df(self, small_df, outputs_dict):
@@ -276,68 +202,16 @@ class LLMRecs:
         
 
 class MFRec:
-    def __init__(self, df, foldername, load, num_users_baseline=10):
-        self.map_dicts = MappingDicts(foldername)
-        book_count = df.groupby('book_id_y').count().reset_index()
-        books = book_count[book_count.user_id>=num_users_baseline]['book_id_y']
-        int_df = df[df.book_id_y.isin(books)]
-        int_df['title'] = int_df['book_id_y'].astype(str).map(self.map_dicts.title_map)
-        self.int_df = int_df
+    def __init__(self, item_type):
+        """ Load the CF model pipeline that was saved"""
+        with open(f'output_data/{item_type}/probes/rec_mf.pkl', 'rb') as file:
+            self.pipe = pickle.load(file)
 
-        self.user_ids_fromdf = self.int_df[self.int_df.is_read == 1].user_id.unique()
-        self.load = load
-        self.save = False
-        if load:
-            try:
-                self.preds_df, self.user_ids_fromdf = self.load_pickles()
-                print('Loaded MF data from folder')
-                
-            except FileNotFoundError:
-                print(f'The MF filepath was not found')
-                self.load=False
-                self.save = True
-            
+    def cf_predict(self, user_id, item_id):
+        """ Get score for user and item_ids from saved model"""
+        # Users and items can be lists
+        return self.pipe.run(user_id, item_id)
 
-    def load_pickles(self):
-        """ Load the MF data that was saved"""
-        with open('probe_pickles/MF_df.pkl', 'rb') as file:
-            preds_df = pickle.load(file)
-        with open('probe_pickles/user_ids_map.pkl', 'rb') as file:
-            user_ids_fromdf = pickle.load(file)
-        return preds_df, user_ids_fromdf
-        
-
-    def do_mf(self):
-        if self.load:
-            return self.preds_df
-        else:
-            R_df = (
-                self.int_df[self.int_df.is_read == 1]
-                .pivot_table(
-                    index='user_id',
-                    columns='title',
-                    values='rating',
-                    aggfunc='mean',
-                    fill_value=0
-                )
-            )
-
-            R = R_df.to_numpy()
-
-            user_ratings_mean = np.mean(R, axis = 1)
-            R_demeaned = R - user_ratings_mean.reshape(-1, 1)
-
-            U, sigma, Vt = svds(R_demeaned, k = 50)
-            sigma = np.diag(sigma)
-            all_user_predicted_ratings = np.dot(np.dot(U, sigma), Vt) + user_ratings_mean.reshape(-1, 1)
-            preds_df = pd.DataFrame(all_user_predicted_ratings, columns = R_df.columns)
-            preds_df.reset_index(names='user_id', inplace=True)
-            if self.save:
-                print('Saving MF dataframe to pkl')
-                preds_df.to_pickle('probe_pickles/MF_df.pkl')
-                with open('probe_pickles/user_ids_map.pkl', 'wb') as f:
-                    pickle.dump(self.user_ids_fromdf, f)
-            return preds_df
         
     def eval_mf_by_author_gender(self, preds_df):
         """Evaluate the top ranked books for each user returned by the MF model"""
@@ -368,14 +242,31 @@ class MFRec:
         
 
 if __name__ == '__main__':
-    
-    llm_recs = LLMRecs('goodreads_data', 2500)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-s","--size_of_sample", type=int, default=10, help="Number of users to include")
+    parser.add_argument("-i","--item_type",type=str, help='Type of item recommendation')
+    parser.add_argument('-m','--model_name', type=str, help ='Model name')
+    args = parser.parse_args()
+
+    if args.item_type == 'book':
+        folder = '~/Documents/repos/probing_classifiers/goodreads_data'
+    elif args.item_type == 'movie':
+        folder = '~/Documents/repos/Glocal_K/1/ml-100k'
+
+    llm_recs = LLMRecs(folder, args.item_type, args.size_of_sample)
     outputs_df = llm_recs.build_full_df()
+    
+    if args.item_type == 'book':
+        llm_recs.output_mf_author_gender(outputs_df)
+
     # # Print summary statistics
     llm_recs.author_gender_count(outputs_df)
     llm_recs.precision(outputs_df)
     llm_recs.output_mf_scores(outputs_df)
-    llm_recs.output_mf_author_gender(outputs_df)
+
+    
+
+    
     # rec_data = RecData('goodreads_data')
     # df = rec_data.merged()
     # mdf = rec_data.merged(agg=False)
