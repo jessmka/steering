@@ -21,11 +21,16 @@ import argparse
 # TODO: Change output calcs to evaluate ranking by score by user gender
     
 class LLMRecs:
-    def __init__(self, output_data_path, item_type, n):
+    def __init__(self, output_data_path, item_type, n, withnegs=True):
         # Load outputs that ran on GPU
-        self.outputs = torch.load(os.path.join(output_data_path, f'output_dict_{item_type}_{n}.pt'), map_location=torch.device('cpu'))
-        
+        if withnegs:
+            neg_str = '_withnegs'
+        else:
+            neg_str = ''
+        self.outputs = torch.load(os.path.join(output_data_path, f'output_dict_{item_type}_{n}{neg_str}.pt'), map_location=torch.device('cpu'))
+        self.item_type = item_type
         # Load original recommendation data
+        
         if item_type == 'book':
             rec_data = BookData()
             self.map_dicts = rec_data.get_map_dicts()
@@ -34,8 +39,8 @@ class LLMRecs:
             self.user_title_dict = rec_data.user_title_dict(result_df)
             self.str1 = "system\n\nCutting Knowledge Date: December 2023\nToday Date: 08 Nov 2025\n\nuser\n\nHi, I\'ve read and enjoyed the following books:"
             self.str1b = "Hi, I\'ve read and enjoyed the following books:"
-            # self.str2 = """  Only return the 5 books you recommend in JSON format like {"Books": {\'title\':..., \'author\':...}}, and nothing else.assistant\n\n"""
-            # self.str3 = """Please recommend new books based on the user\'s reading preferences and only return the 5 books you recommend in JSON format like {"Books": {\'title\':..., \'author\':...}}, and nothing else.assistant"""
+            
+            
             with open(os.path.join(output_data_path, f'gender_dict_{n}.json'), 'r') as f:
                 self.gender_dict = json.load(f)
             verb = 'read'
@@ -45,8 +50,9 @@ class LLMRecs:
             result_df = rec_data.get_rating_df()
             self.gender_dict = rec_data.get_gender_dict()
             self.reverse_title_dict = rec_data.get_reverse_title_dict()
-
-        self.str3 = f"Please rank the following {item_type}s in order from most to least likely to recommend to them to {verb} next: "
+        self.user_title_dict = rec_data.user_title_dict(result_df)
+        self.str3 = f"Only give the {item_type} ranking with no other content or explanation."
+        self.str4 = f"Hi, I've {verb}ed and enjoyed the following {item_type}s:"
 
     
     def small_dict(self, df=True):
@@ -72,17 +78,20 @@ class LLMRecs:
     def map_titles(self, df):
         """ Tries to parse LLM output text  and map to titles in existing book dict"""
         # for k, values in self.outputs.items():
+        print('DF HEAD: ',df.head())
+        df['input_candidates'] = df['baseline_text'].str.split(self.str3).str[1].str.split('assistant\\n').str[0]
+
         for typ in ('baseline', 'steered'):
-            df[f'{typ}_recs'] = df[f'{typ}_text'].str.split(self.str3).str[1].str.replace("\n","")
-            df[f'{typ}_titles'] = df[f'{typ}_recs'].apply(self.extract_titles_to_list)
+            df[f'{typ}_titles'] = df[f'{typ}_text'].str.split('assistant\\n').str[1].apply(self.extract_titles_to_list)
+            # df[f'{typ}_titles'] = df[f'{typ}_recs'].apply(self.extract_titles_to_list)
             df[f'{typ}_ids'] = df[f'{typ}_titles'].apply(
                 lambda x: [
                     self.reverse_title_dict[item] for item in x if item in self.reverse_title_dict
                     ]
                 )
         # And for the original sampled books can use either baseline or steered as they have the same starting string
-        df['hist'] = df['baseline_text'].str.split(self.str3).str[0].str.split(self.str1b).str[1].str.replace(self.str1,"").apply(self.extract_books)
-        df['hist_titles'] = df['hist'].apply(lambda x: [i['title'] for i in x])
+        df['hist_titles'] = df['baseline_text'].str.split(self.str4).str[1].str.split(self.str3).str[0].str.lstrip().apply(lambda x: re.findall(r'(.*?)\s*\(\d{4}\)(?:,|$)', x))
+        # df['hist_titles'] = df['hist'].apply(lambda x: [i['title'] for i in x])
 
 
     def count_from_hist(self, df):
@@ -156,20 +165,21 @@ class LLMRecs:
 
         elif self.item_type == 'movie':
             rec_data  = MovieData()
+            mdf = rec_data.get_all_rating_df()
 
-        mfrec = MFRec(mdf, 'goodreads_data', False)
-        preds_df = mfrec.do_mf()
-        mf_author_gender_df = mfrec.eval_mf_by_author_gender(preds_df)
+        # mfrec = MFRec(mdf, 'goodreads_data', False)
+        # preds_df = mfrec.do_mf()
+        # mf_author_gender_df = mfrec.eval_mf_by_author_gender(preds_df)
 
         self.map_titles(outputs_df)
         self.count_from_hist(outputs_df)
         self.author_gender(outputs_df)
         self.user_gender(outputs_df)
-        outputs2 = self.lookup_mf_scores(outputs_df, preds_df, mfrec.user_ids_fromdf)
+        # outputs2 = self.lookup_mf_scores(outputs_df, preds_df, mfrec.user_ids_fromdf)
         # self.append_mf_to_df(outputs_df, outputs)
-        outputs3 = self.append_mf_author_gender_counts(outputs2, mf_author_gender_df)
+        # outputs3 = self.append_mf_author_gender_counts(outputs2, mf_author_gender_df)
 
-        return outputs3
+        return outputs_df
     
 
     def lookup_mf_scores(self):
@@ -250,10 +260,12 @@ if __name__ == '__main__':
 
     if args.item_type == 'book':
         folder = '~/Documents/repos/probing_classifiers/goodreads_data'
+        
     elif args.item_type == 'movie':
         folder = '~/Documents/repos/Glocal_K/1/ml-100k'
 
-    llm_recs = LLMRecs(folder, args.item_type, args.size_of_sample)
+    output_path = f'output_data/{args.item_type}'
+    llm_recs = LLMRecs(output_path, args.item_type, args.size_of_sample)
     outputs_df = llm_recs.build_full_df()
     
     if args.item_type == 'book':

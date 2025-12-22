@@ -86,11 +86,11 @@ class MovieData:
         user = pd.read_csv(os.path.join(data_path,'ml-100k/u.user'), sep="|", encoding='latin-1', header=None)
         user.columns = ['user_id', 'age', 'gender', 'occupation', 'zip code']
         # Get negatively rated items
-        self.rating_df_neg = all_rating_df[all_rating_df.rating <3]
-        neg_totals = all_rating_df.groupby('user_id')['rating'].agg(lambda x: (x < 3).sum()).reset_index()
+        self.rating_df_neg = self.all_rating_df[self.all_rating_df.rating <3]
+        neg_totals = self.all_rating_df.groupby('user_id')['rating'].agg(lambda x: (x < 3).sum()).reset_index()
         neg_totals.columns = ['user_id','rating_count']
         self.gender_dict = user.set_index('user_id')['gender'].to_dict()
-        rating_df_pos = all_rating_df[all_rating_df.rating>=POS_RATING]
+        rating_df_pos =  self.all_rating_df[ self.all_rating_df.rating>=POS_RATING]
         # Need to filter on users with more than NUM_RATINGS pos ratings
         rating_df_pos['rating_count'] = rating_df_pos.groupby('user_id')['item_id'].transform('count')
         rating_df_pos = rating_df_pos[rating_df_pos.rating_count >= NUM_RATINGS][['user_id','item_id']]
@@ -112,7 +112,7 @@ class MovieData:
         neg_list_df = self.rating_df_neg.groupby('user_id')['item'].agg(list).reset_index()
         return neg_list_df.set_index('user_id')['item'].to_dict()
 
-    def get_movie_gender_dict(self, new_dict):
+    def get_gender_dict(self):
         return self.gender_dict
     
     def get_rating_df(self):
@@ -126,3 +126,10 @@ class MovieData:
     
     def get_reverse_title_dict(self):
         return {value: key for key, value in self.movie_title_dict.items()}
+    
+    def user_title_dict(self, result_df):
+        # Returns a mapping dict with the users total historical titles read and liked 
+        user_title_dict = {}
+        for i, row in result_df.iterrows():
+            user_title_dict[row['user_id']] = [self.movie_title_dict[(i)] for i in row.item_id]
+        return user_title_dict
