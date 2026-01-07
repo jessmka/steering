@@ -1,6 +1,7 @@
 import pandas as pd
 import os
 import json
+import re
 
 POS_RATING = 4
 NUM_RATINGS = 10
@@ -116,16 +117,59 @@ class MovieData:
         return self.gender_dict
     
     def get_rating_df(self):
+        """ Returns all positive rated rows"""
         return self.rating_df
     
     def get_all_rating_df(self):
+        """Returns all rows of rating df"""
         return self.all_rating_df
     
     def get_title_dict(self):
+        """ Return title dict"""
         return self.movie_title_dict
     
     def get_reverse_title_dict(self):
-        return {value: key for key, value in self.movie_title_dict.items()}
+        """ Returns a dict with all combinations of article and year"""
+        new_dict = {}
+        for k, v in self.movie_title_dict.items():
+            # Add the original to the lookup
+            new_dict[v] = k
+            # 1. Strip year and add to dict
+            title = re.sub(r'\s*\(\d{4}\)\s*$', '', v)
+            new_dict[title] = k
+
+            m = re.search(r'^(.*?),\s*(The|A|An)\s*(\(\d{4}\))$', v)
+            if m:
+                main, article, year = m.groups()
+                new_dict[f"{article} {main} {year}"] = k
+                new_dict[f"{main} {year}"] = k
+                new_dict[f"{main}, {article}"] = k
+                new_dict[f"{main}"] = k
+                new_dict[f"{article} {main}"] = k
+
+        return new_dict
+    
+    # def get_reverse_title_dict(self):
+    #     return {value: key for key, value in self.movie_title_dict.items()}
+    
+    # def get_reverse_title_dict_no_year(self):
+    #     """ Strip the years from the reverse title dict"""
+    #     reverse_title_dict = self.get_reverse_title_dict()
+    #     title_dict = {}
+    #     for k, v in reverse_title_dict.items():
+    #         new_key = re.sub(r'\s*\((18[8-9]\d|19\d{2}|20[0-2]\d)\)\s*$', '', k)
+    #         other_key = re.sub(r',\s*The$', '', new_key)
+    #         m = re.search(r'^(.*?),\s*(The|A|An)$', new_key)
+    #         if m:
+    #             main, article = m.groups()
+    #             other_key2 = f"{article} {main}"
+    #             title_dict[other_key2] = v
+    #         title_dict[new_key] = v
+    #         title_dict[other_key] = v
+    #     return title_dict
+
+
+
     
     def user_title_dict(self, result_df):
         # Returns a mapping dict with the users total historical titles read and liked 
@@ -133,3 +177,4 @@ class MovieData:
         for i, row in result_df.iterrows():
             user_title_dict[row['user_id']] = [self.movie_title_dict[(i)] for i in row.item_id]
         return user_title_dict
+    

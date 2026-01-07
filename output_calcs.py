@@ -8,10 +8,9 @@ import os
 # from probes import *
 import numpy as np
 import pickle
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 # torch.set_printoptions(profile="full")
 import re
-import pandas as pd
 from data_classes import BookData, MovieData
 import argparse
 
@@ -50,6 +49,7 @@ class LLMRecs:
             result_df = rec_data.get_rating_df()
             self.gender_dict = rec_data.get_gender_dict()
             self.reverse_title_dict = rec_data.get_reverse_title_dict()
+            # self.reverse_title_dict_no_year = rec_data.get_reverse_title_dict_no_year()
         self.user_title_dict = rec_data.user_title_dict(result_df)
         self.str3 = f"Only give the {item_type} ranking with no other content or explanation."
         self.str4 = f"Hi, I've {verb}ed and enjoyed the following {item_type}s:"
@@ -72,21 +72,63 @@ class LLMRecs:
         if self.item_type == 'book':
             return re.findall(r'^\s*n?\d+\.\s*(.+?)\s*$', text, re.MULTILINE)
         elif self.item_type == 'movie':
-            return re.findall(r'\d*\.\s*(.*?)\s*\(\d{4}\)', text)
+            if not text or not isinstance(text, str):
+                return []
+
+            text = text.strip()
+
+           # Case 1: numbered list
+            if re.search(r'^\s*\d+\.\s+', text, re.MULTILINE):
+                return [
+                    m.strip()
+                    for m in re.findall(r'\d+\.\s*(.+)', text)
+                    if m.strip()
+                ]
+
+            # Case 2: comma-separated titles with years
+            if re.search(r'\(\d{4}\)', text):
+                return [
+                    t.strip()
+                    for t in re.split(r',\s*(?=[^,]*\(\d{4}\))', text)
+                    if t.strip()
+                ]
+
+            # Case 3: fallback
+            return [l.strip() for l in text.splitlines() if l.strip()]
+        
+    def extract_input_candidates(self, text):
+        titles = []
+        buffer = ""
+
+        for ch in text:
+            buffer += ch
+            # detect end of a title: "(YYYY)"
+            if re.search(r'\(\d{4}\)\s*$', buffer):
+                titles.append(buffer.strip().lstrip(",").strip())
+                buffer = ""
+
+        return titles
+
+
     
 
     def map_titles(self, df):
         """ Tries to parse LLM output text  and map to titles in existing book dict"""
         # for k, values in self.outputs.items():
-        print('DF HEAD: ',df.head())
         df['input_candidates'] = df['baseline_text'].str.split(self.str3).str[1].str.split('assistant\\n').str[0]
+        df['input_candidates_list'] = df['input_candidates'].apply(self.extract_input_candidates)
+        df['input_candidate_ids'] = df['input_candidates_list'].apply(
+                lambda x: [
+                    self.reverse_title_dict.get(item) for item in x
+                    ]
+                )
 
         for typ in ('baseline', 'steered'):
             df[f'{typ}_titles'] = df[f'{typ}_text'].str.split('assistant\\n').str[1].apply(self.extract_titles_to_list)
             # df[f'{typ}_titles'] = df[f'{typ}_recs'].apply(self.extract_titles_to_list)
             df[f'{typ}_ids'] = df[f'{typ}_titles'].apply(
                 lambda x: [
-                    self.reverse_title_dict[item] for item in x if item in self.reverse_title_dict
+                    self.reverse_title_dict.get(item) for item in x
                     ]
                 )
         # And for the original sampled books can use either baseline or steered as they have the same starting string
@@ -97,9 +139,12 @@ class LLMRecs:
     def count_from_hist(self, df):
         """ Count the instances that books in the users history were recommended to the user by the LLM"""
         df['titles'] = df['user_id'].map(self.user_title_dict)
+        # TODO: fix logic here, it's trying to count length of list
+        print('DF before set :', df['titles'].head(), df.columns)
         for typ in ('baseline','steered'):
             df[f'{typ}_rec_count'] = df[f'{typ}_titles'].apply(lambda row: len(row))
             # Find items that were recommended to the user that are in their history (but not in initial prompt)
+            
             df[f'{typ}_count'] = df[['titles',f'{typ}_titles','hist_titles']].apply(lambda row: len(list(set(row['titles']).intersection(row[f'{typ}_titles']).difference(row['hist_titles']))), axis=1)
             # Count the number of generated recs that can be mapped to the book_dict
             df[f'{typ}_map_count'] = df[f'{typ}_ids'].apply(lambda row: len(row))
@@ -122,7 +167,11 @@ class LLMRecs:
 
     def user_gender(self, df):
         """ Append annotated user gender to our dict"""
-        df['user_gender'] = df['user_id'].astype(str).map(self.gender_dict)     
+        if self.item_type == 'movie':
+            df['user_gender'] = df['user_id'].map(self.gender_dict)
+
+        else:
+            df['user_gender'] = df['user_id'].astype(str).map(self.gender_dict)
 
 
     def author_gender(self, small_df):
@@ -172,8 +221,9 @@ class LLMRecs:
         # mf_author_gender_df = mfrec.eval_mf_by_author_gender(preds_df)
 
         self.map_titles(outputs_df)
-        self.count_from_hist(outputs_df)
-        self.author_gender(outputs_df)
+        # self.count_from_hist(outputs_df)
+        if self.item_type == 'book':
+            self.author_gender(outputs_df)
         self.user_gender(outputs_df)
         # outputs2 = self.lookup_mf_scores(outputs_df, preds_df, mfrec.user_ids_fromdf)
         # self.append_mf_to_df(outputs_df, outputs)
@@ -184,6 +234,7 @@ class LLMRecs:
 
     def lookup_mf_scores(self):
         """Use loaded model from pickle """
+        pass
 
         
     def append_mf_to_df(self, small_df, outputs_dict):
@@ -268,13 +319,14 @@ if __name__ == '__main__':
     llm_recs = LLMRecs(output_path, args.item_type, args.size_of_sample)
     outputs_df = llm_recs.build_full_df()
     
+    print('OUTPUTS: ', outputs_df[['user_gender','baseline_titles', 'steered_titles']].head())
     if args.item_type == 'book':
         llm_recs.output_mf_author_gender(outputs_df)
 
     # # Print summary statistics
-    llm_recs.author_gender_count(outputs_df)
-    llm_recs.precision(outputs_df)
-    llm_recs.output_mf_scores(outputs_df)
+    # llm_recs.author_gender_count(outputs_df)
+    # llm_recs.precision(outputs_df)
+    # llm_recs.output_mf_scores(outputs_df)
 
     
 
