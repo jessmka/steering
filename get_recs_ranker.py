@@ -26,42 +26,70 @@ NUM_RATINGS = 5
 
 class MovieData:
     def __init__(self, data_path):
+        # Load data
         header = ['user_id', 'item_id', 'rating', 'timestamp']
-        rating_df = pd.read_csv(os.path.join(data_path,'ml-100k/u.data'), sep='\t', names=header)
+        self.rating_df = pd.read_csv(os.path.join(data_path,'ml-100k/u.data'), sep='\t', names=header)
         user = pd.read_csv(os.path.join(data_path,'ml-100k/u.user'), sep="|", encoding='latin-1', header=None)
         user.columns = ['user_id', 'age', 'gender', 'occupation', 'zip code']
-        # Get negatively rated items
-        self.rating_df_neg = rating_df[rating_df.rating <3]
-        neg_totals = rating_df.groupby('user_id')['rating'].agg(lambda x: (x < 3).sum()).reset_index()
-        neg_totals.columns = ['user_id','rating_count']
         self.gender_dict = user.set_index('user_id')['gender'].to_dict()
+        self.movie_title_dict = self.item_data_dict(data_path)
+
+    @staticmethod
+    def process_rating_df(rating_df, rating_type='pos', agg=True):
+    # Need to filter on users with more than NUM_RATINGS pos ratings
         rating_df_pos = rating_df[rating_df.rating>=POS_RATING]
-        # Need to filter on users with more than NUM_RATINGS pos ratings
         rating_df_pos['rating_count'] = rating_df_pos.groupby('user_id')['item_id'].transform('count')
         rating_df_pos = rating_df_pos[rating_df_pos.rating_count >= NUM_RATINGS][['user_id','item_id']]
+        
+        # Get negatively rated items for this group
+        rating_df_neg = rating_df[rating_df.rating <3]
+        neg_totals = rating_df.groupby('user_id')['rating'].agg(lambda x: (x < 3).sum()).reset_index()
+        neg_totals.columns = ['user_id','rating_count']
+
         # Filter on users with at least 2 neg ratings
         rating_df_pos = pd.merge(rating_df_pos, neg_totals[neg_totals.rating_count>=2], on ='user_id', how='inner')
-        self.rating_df = (rating_df_pos.groupby(['user_id'])
-        .agg({'item_id': lambda x: x.tolist()})
-        .reset_index())
+        # self.rating_pos_df = (rating_df_pos
+                            
+        # Filter total DF on only users with at least NUM_RATINGS 
+        rating_df = rating_df[rating_df.user_id.isin(rating_df_pos.user_id)]
+    
+        if rating_type=='pos':
+            df = rating_df_pos
+        elif rating_type == 'neg':
+            df = rating_df_neg
+        elif rating_type == 'all':
+            df = rating_df
+        if agg:
+            # Converts long format to column of list of item IDs
+            return df.groupby('user_id').agg({'item_id': lambda x: x.tolist()}).reset_index()
+        else:
+            return df
         
+
+    def item_data_dict(self, data_path):
         item = pd.read_csv(os.path.join(data_path,'ml-100k/u.item'), sep="|", encoding='latin-1', header=None)
         item.columns = ['movie_id', 'movie_title' ,'release_date','video_release_date', 'IMDb_URL', 'unknown', 'Action', 
                 'Adventure', 'Animation', 'Children\'s', 'Comedy', 'Crime', 'Documentary', 'Drama', 'Fantasy', 'Film-Noir', 
                 'Horror', 'Musical', 'Mystery', 'Romance', 'Sci-Fi', 'Thriller', 'War', 'Western']
         item = item.set_index('movie_id')
-        self.movie_title_dict = item['movie_title'].to_dict() 
+        return item['movie_title'].to_dict() 
+
 
     def get_neg_items(self):
-        self.rating_df_neg['item'] = self.rating_df_neg['item_id'].map(self.movie_title_dict)
-        neg_list_df = self.rating_df_neg.groupby('user_id')['item'].agg(list).reset_index()
+        """Return dict of negatively rated items"""
+        rating_df_neg = MovieData.process_rating_df(self.rating_df, rating_type='neg',agg=False)
+        rating_df_neg['item'] = rating_df_neg['item_id'].map(self.movie_title_dict)
+        neg_list_df = rating_df_neg.groupby('user_id')['item'].agg(list).reset_index()
         return neg_list_df.set_index('user_id')['item'].to_dict()
 
     def get_movie_gender_dict(self, new_dict):
         return self.gender_dict
     
-    def get_rating_df(self):
-        return self.rating_df
+    # TODO: Make  a staticmethod so it can be used by other data classes for manipulating
+    # the item DF
+    def get_rating_df(self, rating_type='pos', agg=True):
+        return self.process_rating_df(self.rating_df, rating_type, agg)
+        
     
     def get_title_dict(self):
         return self.movie_title_dict
@@ -95,21 +123,24 @@ class BookData:
         totals.columns = ['user_id','rating_count']
         merged_df2 = pd.merge(self.merged_df1, totals[totals.rating_count >= 10], on ='user_id', how='inner')
         merged_df3 = pd.merge(merged_df2, neg_totals[neg_totals.rating_count>=2], on ='user_id', how='inner')
-        self.rating_df = merged_df3.groupby('user_id')['book_id_y'].agg(list).reset_index()
+        self.rating_df = merged_df3[['user_id','book_id_y','rating']].rename(columns={'book_id_y':'item_id'})
+        # self.rating_df = merged_df3.groupby('user_id')['book_id_y'].agg(list).reset_index()
 
     def get_neg_items(self):
-        """ Return list of negative items per user if they exist"""
+        """ Return dict of negative items per user if they exist"""
         # Make a neg df then create lists from the rows:
-        neg_df = self.merged_df1[self.merged_df1.rating <3]
-        neg_df2 = neg_df.groupby('user_id')['book_id_y'].agg(list).reset_index()
-        neg_df_list = neg_df2.groupby('user_id')['book_id_y'].agg(list).reset_index()
-        neg_dict = neg_df_list.set_index('user_id')['book_id_y'].to_dict()
+        neg_df = MovieData.process_rating_df(self.rating_df, rating_type='neg', agg=False)
+        neg_df2 = neg_df.groupby('user_id')['item_id'].agg(list).reset_index()
+        neg_df_list = neg_df2.groupby('user_id')['item_id'].agg(list).reset_index()
+        neg_dict = neg_df_list.set_index('user_id')['item_id'].to_dict()
         return neg_dict
         
     def get_book_dict(self):
         return self.book_dict
-    def get_rating_df(self):
-        return self.rating_df
+    
+    def get_rating_df(self, rating_type='pos', agg=True):
+        return  MovieData.process_rating_df(self.rating_df,rating_type, agg)
+    
     def get_author_dict(self):
         return self.author_dict
 
@@ -132,6 +163,7 @@ class GetRecs:
             self.author_dict = self.data.get_author_dict()
         
         self.neg_dict = self.data.get_neg_items()
+        # TODO: Need to add args here. Currently is only pulling in positive
         self.rating_df = self.data.get_rating_df()
         # self.gender_dict = data.get_gender_dict(data_dict)
         load_model = LoadModel(model_name)
@@ -139,6 +171,12 @@ class GetRecs:
         self.max_layer = load_model.get_layers()
         self.tokenizer = load_model.get_tokenizer()
         self.data_path = steering_data_path
+
+    def get_movie_title_dict(self):
+        return self.movie_title_dict
+    
+    def get_book_title_dict(self):
+        return self.book_dict
 
     def get_device(self):
         return self.model.device
@@ -214,15 +252,21 @@ class GetRecs:
         if self.item_type == 'movie':
             for i, row in self.rating_df.iterrows():
                 # print('Row item length: ',len(row.item_id))
-                data_dict[row.user_id] = dict(neg_items=[], prompt='')
+                # TODO: Does rating_df only include pos items here? Yes. But need list
+                #  of unsampled items too
+                data_dict[row.user_id] = dict(cans_items =[], val_items=[], neg_items =[], prompt='')
                 ids = random.sample(row.item_id, 5)
+                data_dict[row.user_id]['cans_items'] = ids
+                data_dict[row.user_id]['val_items'] = list(set(row.item_id) - set(ids))
                 title_list = [self.movie_title_dict[i] for i in ids]
                 data_dict[row.user_id]['prompt'] = prompt + ",".join(title_list)
         elif self.item_type == 'book':
             for i, row in self.rating_df.iterrows():
             # sample ids from user list
-                data_dict[row.user_id] = dict(neg_items=[], prompt='')
-                ids = random.sample(row.book_id_y, 5)
+                data_dict[row.user_id] = dict(cans_items =[], val_items=[], neg_items=[], prompt='')
+                ids = random.sample(row.item_id, 5)
+                data_dict[row.user_id]['cans_items'] = ids
+                data_dict[row.user_id]['val_items'] = list(set(row.item_id) - set(ids))
                 # other_seen_rated_titles = [self.book_dict[str(i)]['title'] for i in row.book_id_y if i not in ids]
                 # other_seen_liked[row.user_id] = other_seen_rated_titles
                 book_list = []
@@ -236,8 +280,6 @@ class GetRecs:
                         book_list.append(title)
                     data_dict[row.user_id]['prompt'] = prompt + ",".join(book_list)
 
-        # TODO: add negative items to the list, might need to change format of dict
-        # to include some new keys
         for k, v in data_dict.items():
             data_dict[k]['neg_items'] = self.neg_dict.get(k)
 
@@ -520,16 +562,83 @@ class LoadModel:
         return self.tokenizer
     
 class Candidates():
-    def __init__(self, data_path, random_rank=True):
+    def __init__(self, data_path, can_type='from_file', random_rank=True):
         # ~/Documents/repos/probing_classifiers/cf.ipynb creates the parquet
-        with open(os.path.join(data_path, 'candidate_dict.json'), 'r') as file:
-            self.candidate_dict = json.load(file)
-        # if random_rank:
-        #     for k, v in self.candidate_dict.items():
-        #         self.candidate_dict[k] = random.shuffle(v)
+        self.random_rank = random_rank
+        if can_type == 'from_file':
+            with open(os.path.join(data_path, 'candidate_dict.json'), 'r') as file:
+                self.candidate_dict = json.load(file)
+        # If we want to only user user history for candidates
+        # elif can_type == 'from_user_hist':
+
+
 
     def get_candidates(self):
         return self.candidate_dict
+    
+    def restrict_to_set(self, mydict):
+        """Restrict candidate dict to only the sample in mydict"""
+        return {key: cans_dict[str(key)] for key in mydict.keys()}
+    
+    def get_negs_and_vals(self, subset_dict, cans_dict):
+        new_cans_dict = {}
+        for k, v in cans_dict.items():
+            new_cans_dict[k] = dict(cans_titles=[], cans_ids=[])
+            new_cans = []
+            if subset_dict.get(int(k)) is not None:
+                negs = subset_dict.get(int(k)).get('neg_items')
+                if len(negs) > 2:
+                    negs = random.sample(negs, 2)
+                vals = subset_dict.get(int(k)).get('val_items')
+                if len(vals) > 5:
+                    vals = random.sample(vals, 5)
+                new_cans.append(negs)
+                new_cans.append(vals)
+            # If val items and neg items is less than 10, fill to 10 with candidates
+            if len(new_cans) < 10:
+                cans_sample = random.sample(v, 10 - len(new_cans))
+                new_cans.append(cans_sample)
+
+            if self.random_rank:
+                random.shuffle(new_cans)
+            new_cans_dict[k]['cans_ids'] = new_cans
+
+        print('NEW CANDIDATES: ', new_cans_dict)
+        return new_cans_dict
+    
+    # @classmethod
+    # def get_negs(self, new_dict, cans_dict):
+    #     """ Add negatives to candidate set and shuffle. New dict is users in sample"""
+    #     for k, v in cans_dict.items():
+    #         if new_dict.get(int(k)) is not None:
+
+    #             negs = new_dict.get(int(k)).get('neg_items')
+                
+              
+
+    #             # Swap 2 negative items in if they have them
+    #             if len(negs)==1:
+    #                 random_index = random.randrange(len(v))
+    #                 v[random_index] = negs[0]
+    #             if len(negs) >=2:
+    #                 neg_sample = random.sample(negs, 2)
+    #                 random_index1 = random.randrange(len(v))
+    #                 random_index2 = random.randrange(len(v))
+    #                 v[random_index1] = neg_sample[0]
+    #                 v[random_index2] = neg_sample[1]
+    #             # Now add validation items
+    #             vals = new_dict.get(int(k)).get('val_items')
+    #             if len(vals) == 0:
+    #                 break
+    #             elif len(vals) > 5:
+    #                 vals = 
+    #             for i in range(len(vals)):
+
+    #         if self.random_rank:
+    #             random.shuffle(v)
+            
+    #     return cans_dict
+
 
 
         
@@ -601,27 +710,25 @@ if __name__ == '__main__':
     # Only implemented for books so far
     data_dict = get_recs.get_data_dict()
 
-    # load_model = LoadModel(model_name)
-    # model = load_model.get_model()
-
     # Get a list of (key, value) pairs
     items = list(data_dict.items())
     
     np.random.seed(42)
-    # Randomly sample the desired number of items
+
+    # Randomly sample the desired number of users
     if size_of_sample > len(data_dict):
         size_of_sample = len(data_dict)
-    random_items = random.sample(items, size_of_sample)
+    new_dict = dict(random.sample(items, size_of_sample))
     
     # Create a new dictionary from the sampled items
     print('CREATING DATA DICT')
-    new_dict = dict(random_items)
 
     if torch.cuda.is_available():
         print(torch.cuda.memory_summary(device=None, abbreviated=False))
     gender_dict = get_recs.get_gender_dict(new_dict)
     # torch.cuda.empty_cache()
     # gc.collect()
+
     embedding_data_dict = get_recs.get_prompts_hidden(new_dict, gender_dict)
     regress_list, results = get_recs.get_regress_list(embedding_data_dict)
     del embedding_data_dict
@@ -650,22 +757,20 @@ if __name__ == '__main__':
     cans = Candidates(output_path)
     cans_dict = cans.get_candidates()
     # Restrict to only users in new_dict
-    subset_cans_dict = {key: cans_dict[str(key)] for key in new_dict.keys()}
-    print(len(cans_dict), len(subset_cans_dict))
-    # TODO: need to add some negative items to candidates
+    # TODO []: Change candidate dict to have IDs instead of titles then map titles later
+    subset_cans_dict = cans.restrict_to_set(new_dict)
+    negs_cans_dict = cans.get_negs_and_vals(new_dict, subset_cans_dict)
+    # Append titles to list of ids
+    # for k, v in negs_cans_dict:
+    #     if args.item_type == 'movie':
+    #         negs_cans_dict[k]['cans_titles'] = [self.movie_title_dict[i] for i in v['can_items']]
+    #     elif args.item_type == 'book':
+    #         negs_cans_dict[k]['cans_titles'] = [self.book_dict[str(i)]['title'] for i in v['can_items']
+
+    print('Candidate length: ', len(cans_dict), len(subset_cans_dict))
+    del subset_cans_dict # Free up some space
+    # TODO [x]: need to add some positive items to candidates
     
-    for k, v in subset_cans_dict.items():
-        if new_dict.get(int(k)) is not None:
-            negs = new_dict.get(int(k)).get('neg_items')
-            # Swap 2 negative items in if they have them
-            if len(negs) >=2:
-                neg_sample = random.sample(negs, 2)
-                random_index1 = random.randrange(len(v))
-                random_index2 = random.randrange(len(v))
-                v[random_index1] = neg_sample[0]
-                v[random_index2] = neg_sample[1]
-                # print('Replacing with negs: ',v[random_index1], v[random_index2])
-        random.shuffle(v)
     
     # if args.save:
     print(datetime.now())
