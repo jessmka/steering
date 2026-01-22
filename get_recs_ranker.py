@@ -82,6 +82,7 @@ class MovieData:
         rating_df_neg['item'] = rating_df_neg['item_id']#.map(self.movie_title_dict)
         neg_list_df = rating_df_neg.groupby('user_id')['item'].agg(list).reset_index()
         return neg_list_df.set_index('user_id')['item'].to_dict()
+    
 
     def get_movie_gender_dict(self, new_dict):
         return self.gender_dict
@@ -322,12 +323,21 @@ class GetRecs:
 
         return embedding_data_dict
 
-    def get_regress_list(self, embedding_data_dict):
+    def get_regress_list(self, embedding_data_dict, log_reg_type='reg'):
         regress_list = []
         results = []
         # i = 0
         for key_layer, value in embedding_data_dict.items():
-            clf = LogisticRegression(max_iter=1000, solver='lbfgs')
+            if log_reg_type == 'reg':
+                clf = LogisticRegression(max_iter=1000, solver='lbfgs')
+            elif log_reg_type=='elastic':
+                clf = LogisticRegression(
+                    penalty='elasticnet',
+                    solver='saga',
+                    l1_ratio=0.5,  # 50% L1, 50% L2
+                    C=0.1,
+                    random_state=0
+                )
 
             if key_layer >=  (self.max_layer-5):
                 # for j in value:
@@ -696,12 +706,13 @@ if __name__ == '__main__':
     # gc.collect()
 
     embedding_data_dict = get_recs.get_prompts_hidden(new_dict, gender_dict)
-    regress_list, results = get_recs.get_regress_list(embedding_data_dict)
+    log_reg_type = 'reg' #'elastic'
+    regress_list, results = get_recs.get_regress_list(embedding_data_dict, log_reg_type)
     del embedding_data_dict
     i = 0
     for mod in regress_list:
-        print('trying to save to path:', os.path.join(output_path, f'probes/model{i}.pkl'))
-        with open(os.path.join(output_path, f'probes/model{i}.pkl'),'wb') as f:
+        print('trying to save to path:', os.path.join(output_path, f'probes/model{i}_{log_reg_type}.pkl'))
+        with open(os.path.join(output_path, f'probes/model{i}_{log_reg_type}.pkl'),'wb') as f:
             pickle.dump(mod,f)
         i+=1
     print('Results: ', results)
