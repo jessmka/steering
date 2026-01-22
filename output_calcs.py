@@ -27,6 +27,9 @@ class LLMRecs:
         else:
             neg_str = ''
         self.outputs = torch.load(os.path.join(output_data_path, f'output_dict_{item_type}_{n}{neg_str}.pt'), map_location=torch.device('cpu'))
+        with open(os.path.join(output_data_path, 'can_dict_new.json'), 'r', encoding='utf-8') as file:
+        # Load and parse the JSON content into a Python dictionary
+            self.candidates = json.load(file)
         self.item_type = item_type
         # Load original recommendation data
         
@@ -53,6 +56,15 @@ class LLMRecs:
         self.user_title_dict = rec_data.user_title_dict(result_df)
         self.str3 = f"Only give the {item_type} ranking with no other content or explanation."
         self.str4 = f"Hi, I've {verb}ed and enjoyed the following {item_type}s:"
+
+        d = 'movie_id | movie title | release date | video release date | IMDb URL | unknown | Action | Adventure | Animation | Children | Comedy | Crime | Documentary | Drama | Fantasy | Film-Noir | Horror | Musical | Mystery | Romance | Sci-Fi | Thriller | War | Western'
+        genre_cols = 'movie_id | unknown | Action | Adventure | Animation | Children | Comedy | Crime | Documentary | Drama | Fantasy | Film-Noir | Horror | Musical | Mystery | Romance | Sci-Fi | Thriller | War | Western'.split(' | ')
+        genre_only_cols = 'unknown | Action | Adventure | Animation | Children | Comedy | Crime | Documentary | Drama | Fantasy | Film-Noir | Horror | Musical | Mystery | Romance | Sci-Fi | Thriller | War | Western'.split(' | ')
+        column_names = d.split(' | ')
+        data_path = '/Users/jessicakahn/Documents/repos/Glocal_K/1'
+        item = pd.read_csv(os.path.join(data_path,'ml-100k/u.item'), sep='|',header=None,names=column_names,encoding='latin-1')
+        self.item_df = item[genre_cols]
+        self.item_df['genre_sum'] = self.item_df.iloc[:, 1:20].sum(axis=1)
 
     
     def small_dict(self, df=True):
@@ -96,6 +108,8 @@ class LLMRecs:
             # Case 3: fallback
             return [l.strip() for l in text.splitlines() if l.strip()]
         
+
+        
     def extract_input_candidates(self, text):
         titles = []
         buffer = ""
@@ -115,22 +129,38 @@ class LLMRecs:
     def map_titles(self, df):
         """ Tries to parse LLM output text  and map to titles in existing book dict"""
         # for k, values in self.outputs.items():
-        df['input_candidates'] = df['baseline_text'].str.split(self.str3).str[1].str.split('assistant\\n').str[0]
-        df['input_candidates_list'] = df['input_candidates'].apply(self.extract_input_candidates)
-        df['input_candidate_ids'] = df['input_candidates_list'].apply(
-                lambda x: [
-                    self.reverse_title_dict.get(item) for item in x
-                    ]
-                )
+        # Can just join can_dict_new to get candidates 
+        df['input_candidates'] = df['user_id'].apply(lambda x: self.candidates.get(str(x)).get('cans_titles'))
+        df['input_candidate_ids'] = df['user_id'].apply(lambda x: self.candidates.get(str(x)).get('cans_ids'))
+        # try:
+        #     df['input_candidates'] = df['baseline_text'].str.split(self.str3).str[1].str.split('assistant\\n').str[0]
+        # except:
+        #     # TODO []: See what is wrong with this, somehow the text isn't reading in properly
+        #     pass
+
+        # print('Check DF: ', df.head(2))
+        # df['input_candidates_list'] = df['input_candidates'].apply(self.extract_input_candidates)
+        # df['input_candidate_ids'] = df['input_candidates_list'].apply(
+        #         lambda x: [
+        #             self.reverse_title_dict.get(item) for item in x
+        #             ]
+        #         )
 
         for typ in ('baseline', 'steered'):
+            # Identify the ids and dedupe, by keeping the first instance list(dict.from_keys)
             df[f'{typ}_titles'] = df[f'{typ}_text'].str.split('assistant\\n').str[1].apply(self.extract_titles_to_list)
             # df[f'{typ}_titles'] = df[f'{typ}_recs'].apply(self.extract_titles_to_list)
             df[f'{typ}_ids'] = df[f'{typ}_titles'].apply(
-                lambda x: [
+                lambda x: list(dict.fromkeys([
                     self.reverse_title_dict.get(item) for item in x
-                    ]
+                    ]))
                 )
+            # Filter ids to only the candidates? The LLM sometimes adds other items
+            df[f'{typ}_ids'] = df.apply(lambda row: list(dict.fromkeys(
+                [i for i in row[f'{typ}_ids'] if i in row['input_candidate_ids']]
+            )), axis=1)
+
+
         # And for the original sampled books can use either baseline or steered as they have the same starting string
         df['hist_titles'] = df['baseline_text'].str.split(self.str4).str[1].str.split(self.str3).str[0].str.lstrip().apply(lambda x: re.findall(r'(.*?)\s*\(\d{4}\)(?:,|$)', x))
         # df['hist_titles'] = df['hist'].apply(lambda x: [i['title'] for i in x])
@@ -176,6 +206,7 @@ class LLMRecs:
 
     def author_gender(self, small_df):
         """ Append author gender where available to our dict"""
+        # print('Check small_df: ', small_df.dtypes, small_df.head(2))
         for typ in ('baseline','steered'):
             small_df[f'{typ}_author_list'] = small_df[f'{typ}_ids'].apply(
             lambda row: [
@@ -235,6 +266,16 @@ class LLMRecs:
     def lookup_mf_scores(self):
         """Use loaded model from pickle """
         pass
+
+    def rank_genre(self, df):
+        """ Append genres to the full DF, df from build_fill_df() """
+        bdf = df
+        for steer_type in ('baseline', 'steered'):
+            bdf = bdf[[f'{steer_type}_ids','user_id','user_gender']].explode(f'{steer_type}_ids')
+            bdf[f'{steer_type}_row_num'] = bdf.groupby(['user_id','user_gender'], sort=False).cumcount() + 1
+            bdf = bdf.merge(self.item_df, how='left', left_on=f'{steer_type}_ids', right_on='movie_id')
+
+        
 
         
     def append_mf_to_df(self, small_df, outputs_dict):
@@ -300,6 +341,7 @@ class MFRec:
         return output
 
 
+
         
 
 if __name__ == '__main__':
@@ -316,7 +358,7 @@ if __name__ == '__main__':
         folder = '~/Documents/repos/Glocal_K/1/ml-100k'
 
     output_path = f'output_data/{args.item_type}'
-    llm_recs = LLMRecs(output_path, args.item_type, args.size_of_sample)
+    llm_recs = LLMRecs(output_path, args.item_type, args.size_of_sample, True)
     outputs_df = llm_recs.build_full_df()
     
     print('OUTPUTS: ', outputs_df[['user_gender','baseline_titles', 'steered_titles']].head())
