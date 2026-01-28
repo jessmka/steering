@@ -200,9 +200,9 @@ class GetRecs:
             probe_list: list,
             item_type: str,
             candidates: str, 
-            W_probe_Tl: any,
+            W_probe_l: any,
             pinv_W_Tl: any,
-            W_probe_Tl_1: any,
+            W_probe_l_1: any,
             pinv_W_Tl_1: any
     ):
         """
@@ -243,7 +243,7 @@ class GetRecs:
         # gc.collect()
         # === Set up capture and steering for steered run ===
         # capture = {"pre": None, "post": None}
-        first_pass_done = False
+        first_pass_done = {"value":False}
 
         # Determine expected sequence length (avoid capturing inputs inside closures)
         seq_len_expected = inputs.shape[1]
@@ -273,7 +273,7 @@ class GetRecs:
         def make_steering_hook(W_probe_T_local, pinv_W_T_local):
             def steering_hook(module, input, output):
                 try:
-                    if output.shape[1] == seq_len_expected and not first_pass_done:
+                    if output.shape[1] == seq_len_expected and not first_pass_done['value']:
                         hidden = output
 
                         x_proj0 = hidden @ W_probe_T_local
@@ -283,8 +283,7 @@ class GetRecs:
                         steered = hidden + alpha * v
 
                         # mark done
-                        nonlocal first_pass_done
-                        first_pass_done = True
+                        first_pass_done['value'] = True
 
                         return steered
 
@@ -295,8 +294,8 @@ class GetRecs:
 
             return steering_hook
 
-        hook_l_1 = make_steering_hook(W_probe_Tl_1, pinv_W_Tl_1)
-        hook_l = make_steering_hook(W_probe_Tl, pinv_W_Tl)
+        hook_l_1 = make_steering_hook(W_probe_l_1, pinv_W_Tl_1)
+        hook_l = make_steering_hook(W_probe_l, pinv_W_Tl)
         # === Register hooks safely on the minimal set of layers needed ===
         # (adjust layer indices to your model architecture if necessary)
         # h0 = self.model.model.layers[layer_to_steer].register_forward_hook(get_hidden_state_hook)
@@ -435,9 +434,9 @@ if __name__ == '__main__':
             item_type=args.item_type,
             candidates = v['pos_titles']+v['neut_titles']+v['neg_titles'],
             W_probe_l = W_probe_l,
-            pinv_W_T_l = pinv_W_Tl,
+            pinv_W_Tl = pinv_W_Tl,
             W_probe_l_1 = W_probe_l_1,
-            pinv_W_T_l_1 = pinv_W_Tl_1
+            pinv_W_Tl_1 = pinv_W_Tl_1
         )
         inner_dict[k] = result
         # torch.cuda.empty_cache()
