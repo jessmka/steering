@@ -28,6 +28,8 @@ class FolderCheck:
                 self.folder = self.base_path
             elif args.item_type == 'movie':
                 self.folder = os.path.join(self.base_path,"1/")
+            elif args.item_type == 'music':
+                self.folder = 'output_data/music'
         else:
             self.base_path = '/Users/jessicakahn/Documents/repos/'
             if args.model_name is None:
@@ -35,8 +37,10 @@ class FolderCheck:
             else: model_name = args.model_name
             if args.item_type == 'book':
                 self.folder = self.base_path
-            if args.item_type == 'movie':
+            elif args.item_type == 'movie':
                 self.folder = os.path.join(self.base_path,"Glocal_K/1/")
+            elif args.item_type == 'music':
+                self.folder = 'output_data/music'
         
         self.output_path = os.path.join(self.base_path,f'steering/output_data/{args.item_type}/')
         for dir_path in (self.base_path, self.output_path, os.path.join(self.output_path, 'probes/'), self.folder):
@@ -92,6 +96,7 @@ class LoadModel:
 class GetRecs:
     def __init__(self, item_type, data_path, model_name='meta-llama/Llama-3.2-3B-Instruct'):
         self.item_type = item_type
+        # These files are created by data_prep.py
         steering_data_path = os.path.join(data_path,'steering/')
         with open(f'output_data/{item_type}/processed_data_dict.json', 'r') as file:
             self.data_dict = json.load(file)
@@ -214,9 +219,14 @@ class GetRecs:
         # === Prepare model input ===
         if item_type == 'book':
             verb = 'read'
+            noun = 'book'
         elif item_type == 'movie':
             verb = 'watch'
-        request_str = f"Please rank the following {item_type}s in order from most to least likely to recommend to them to {verb} next. Only give the {item_type} ranking with no other content or explanation."
+            noun = 'movie'
+        elif item_type == 'music':
+            verb = 'listen to'
+            noun = 'song'
+        request_str = f"Please rank the following {noun}s in order from most to least likely to recommend to them to {verb} next. Only give the {noun} ranking with no other content or explanation."
         # print('TEXT: ', prompt, request_str, candidates)
         chat = [[{"role": "user", "content": prompt + request_str + candidate_str}]]
         inputs = self.tokenizer.apply_chat_template(
@@ -377,7 +387,7 @@ if __name__ == '__main__':
     new_dict = dict(random.sample(items, size_of_sample))
 
     embedding_data_dict = get_recs.get_prompts_hidden(new_dict)
-    log_reg_type = 'reg' #'elastic'
+    log_reg_type = 'reg' # ('elastic', 'reg')
 
     if args.saved_regression:
         regress_list = []
@@ -449,7 +459,7 @@ if __name__ == '__main__':
         inner_dict, 
         os.path.join(
             output_path,
-            f'output_dict_{args.item_type}_{size_of_sample}_withnegs.pt'
+            f'output_dict_{args.item_type}_{size_of_sample}_withnegs_{log_reg_type}.pt'
                      )
     )
     
