@@ -11,6 +11,8 @@ import pickle
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import cross_val_score
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import roc_auc_score, make_scorer
 import re
 import os
 import collections
@@ -102,8 +104,16 @@ class GetRecs:
             self.data_dict = json.load(file)
         with open(f'output_data/{item_type}/title_dict.json', 'r') as file:
             self.title_dict = json.load(file)
-        with open(f'output_data/{item_type}/gender_dict.json','r') as file:
-            self.gender_dict = json.load(file)
+        try:
+            with open(f'output_data/{item_type}/gender_dict.json','r') as file:
+                self.gender_dict = json.load(file)
+        except:
+            self.gender_dict = None
+        try:
+            with open(f'output_data/{item_type}/age_dict.json','r') as file:
+                self.age_dict = json.load(file)
+        except:
+            self.age_dict = None
 
         load_model = LoadModel(model_name)
         self.model = load_model.get_model()
@@ -114,7 +124,7 @@ class GetRecs:
     def get_data_dict(self):
         return self.data_dict
 
-    def max_layer(self):
+    def get_max_layer(self):
         return self.max_layer
     
     def get_device(self):
@@ -125,6 +135,7 @@ class GetRecs:
         # Create keys with empty lists for each layer in hidden_states
         for j in range(self.max_layer+1):
             embedding_data_dict[j] = []
+        # print('EMBED DICT', embedding_data_dict)
         # Loop through and add demo + hidden_state to data_dict
         for k,v in data_dict.items():
             inputs = self.tokenizer(v['prompt'], return_tensors="pt", padding=True).to(self.model.device)
@@ -139,25 +150,45 @@ class GetRecs:
             
             # Extract hidden states
             hidden_states = outputs.hidden_states
+            # print('LEN hidden', len(hidden_states))
         
             # Lookup gender
-            gender = self.gender_dict[k]
+            if self.gender_dict.get(k):
+                gender = self.gender_dict[k]
+            else:
+                gender = None
+            if self.age_dict.get(k):
+                age_group = self.age_dict[k]
+            else:
+                age_group = None
+            demo = dict(gender=gender, age_group=age_group)
+
             for idx, repr in enumerate(hidden_states):
-                if idx >= (self.max_layer-5):
+                if idx >= (self.max_layer-15): # Might need to adjust this to the steering layer
                     hidden_repr = repr.mean(dim=1).squeeze(0).squeeze(0).detach().cpu()
                 else:
                     hidden_repr = None
-                embedding_data_dict[idx].append(dict(demo=gender, hidden=hidden_repr))
+                embedding_data_dict[idx].append(dict(demo=demo, hidden=hidden_repr))
+        
         del hidden_states
         del outputs
         torch.cuda.empty_cache()
 
         return embedding_data_dict
     
-    def get_regress_list(self, embedding_data_dict, log_reg_type='reg'):
-        regress_list = []
+    def get_regress_list(self, embedding_data_dict, layer_to_steer, log_reg_type='reg', demo_var='gender'):
+        regress_dict = {}
         results = []
-        # i = 0
+        if demo_var == 'gender':
+            scorer = 'roc_auc'
+        else:
+            scorer = make_scorer(
+                roc_auc_score,
+                multi_class='ovr', # or 'ovo'
+                response_method="predict_proba",
+                average='macro' # or 'weighted'
+            )
+
         for key_layer, value in embedding_data_dict.items():
             if log_reg_type == 'reg':
                 clf = LogisticRegression(max_iter=1000, solver='lbfgs')
@@ -170,9 +201,10 @@ class GetRecs:
                     random_state=0
                 )
 
-            if key_layer >=  (self.max_layer-5):
+            if (key_layer >=  (layer_to_steer-2)) and (key_layer <= layer_to_steer):
+            # if value[0]['hidden'] is not None:
                 # for j in value:
-                X = [j['hidden'].detach().cpu() for j in value if j['demo']!='Unknown']
+                X = [j['hidden'].detach().cpu() for j in value if j['demo'][demo_var]!='Unknown']
                 # print('X:  ',X)
                 X_tensor = torch.stack([
                     x.to(torch.float32)          # convert each element
@@ -183,18 +215,21 @@ class GetRecs:
 
                 X_np = X_tensor.numpy()
 
-                y = [j['demo'] for j in value if j['demo']!='Unknown']
-                # clf = LogisticRegression(multi_class='multinomial',solver='newton-cg')
+                y = [j['demo'][demo_var] for j in value if j['demo'][demo_var] and j['demo'][demo_var]!='Unknown']
+                
+                # Use these for multi-class
+                # le = LabelEncoder()
+                # y_enc = le.fit_transform(y)
                 
                 clf = clf.fit(X_np, y)
-            
-                scores = cross_val_score(clf, X_np, y, cv=5, scoring='roc_auc')
+                # print('COEF :', clf.coef_)
+                scores = cross_val_score(clf, X_np, y, cv=5, scoring=scorer)
                 results.append(np.array(scores).mean())
-                regress_list.append(clf)
-            else:
-                regress_list.append(clf)
+                regress_dict[key_layer] = clf
+            # else:
+            #     regress_list.append(clf)
 
-        return regress_list, results
+        return regress_dict, results
     
     def steer_prompt_compare(
             self,
@@ -367,6 +402,8 @@ if __name__ == '__main__':
     parser.add_argument("-s","--size_of_sample", type=int, default=10, help="Number of users to include")
     parser.add_argument("-i","--item_type",type=str, default='movie', help='Type of item recommendation')
     parser.add_argument('-m','--model_name', type=str, default='tinyllama', help ='Model name')
+    parser.add_argument('-l', '--layer_to_steer', type=int, help="Which layer to steer on will do this and one before")
+    parser.add_argument('-d', '--demo', type=str, default='gender', help='Demographic for regression')
     parser.add_argument('-sr', '--saved_regression', action='store_true', help='Use saved probes from regression')
     # parser.add_argument('')
     args = parser.parse_args()
@@ -389,27 +426,33 @@ if __name__ == '__main__':
     embedding_data_dict = get_recs.get_prompts_hidden(new_dict)
     log_reg_type = 'reg' # ('elastic', 'reg')
 
+    # if args.model_name == 'tinyllama':
+    #     last_layer = 21
+    # elif args.model_name == 'llama3b':
+    #     last_layer = 18 # Need to change this in 2 places
+
     if args.saved_regression:
-        regress_list = []
-        for i in range(get_recs.max_layer()):
+        regress_dict = {}
+        for i in range(get_recs.get_max_layer()):
             with open(os.path.join(output_path, f'probes/model{i}_{log_reg_type}.pkl'),'rb') as f:
-                regress_list.append(pickle.load(f))
+                regress_dict[i] = pickle.load(f)
+                # regress_list.append(pickle.load(f))
         
     if not args.saved_regression:
-        regress_list, results = get_recs.get_regress_list(embedding_data_dict, log_reg_type)
+        regress_dict, results = get_recs.get_regress_list(embedding_data_dict, args.layer_to_steer, log_reg_type, args.demo)
         print('Regression results: ', results)
-        i = 0
-        for mod in regress_list:
-            with open(os.path.join(output_path, f'probes/model{i}_{log_reg_type}.pkl'),'wb') as f:
+        date_string = datetime.now().strftime("%Y-%m-%d")
+        with open(os.path.join(output_path, f'probes/results_{log_reg_type}_{date_string}.pkl'),'wb') as f:
+                pickle.dump(results,f)
+        # i = 0
+        for k, mod in regress_dict.items():
+            with open(os.path.join(output_path, f'probes/model{k}_{log_reg_type}.pkl'),'wb') as f:
                 pickle.dump(mod,f)
-            i+=1
+            # i+=1
     steer_compare_results = []
     counter = 0
 
-    if args.model_name == 'tinyllama':
-        last_layer = 21
-    else:
-        last_layer = 27
+    
 
     print(datetime.now())
 
@@ -420,10 +463,14 @@ if __name__ == '__main__':
     # Precompute the probe weight matrix (as float32) once, on the same device as the model.
     # Note: this is small relative to model parameters; move to CPU if you want
     print('Computing W matrix',  (datetime.now()))
-    W_probe_l = torch.tensor(regress_list[last_layer].coef_, dtype=torch.float32, device=device)
+    # print('REGRESS', (regress_dict.keys()))
+    # print([i.coef_ for i in regress_list])
+    # print('\n LAST LAYER', regress_list[last_layer])
+
+    W_probe_l = torch.tensor(regress_dict[args.layer_to_steer].coef_, dtype=torch.float32, device=device)
     # W_probe_T1 = W_probe1.T
 
-    W_probe_l_1 = torch.tensor(regress_list[last_layer-1].coef_, dtype=torch.float32, device=device)
+    W_probe_l_1 = torch.tensor(regress_dict[args.layer_to_steer-1].coef_, dtype=torch.float32, device=device)
     # W_probe_T2 = W_probe2.T
 
     # W_probe_T = (W_probe_T1,W_probe_T2 )
@@ -438,9 +485,9 @@ if __name__ == '__main__':
         result = get_recs.steer_prompt_compare(
             prompt=v['prompt'],
             alpha=1.0,
-            layer_to_steer=last_layer,
+            layer_to_steer=args.layer_to_steer,
             max_new_tokens=200,
-            probe_list=regress_list,
+            probe_list=regress_dict,
             item_type=args.item_type,
             candidates = v['pos_titles']+v['neut_titles']+v['neg_titles'],
             W_probe_l = W_probe_l,
