@@ -10,13 +10,15 @@ import numpy as np
 import pickle
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score,StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import roc_auc_score, make_scorer
 import re
 import os
 import collections
 from datetime import datetime
+from accelerate.big_modeling import disk_offload
+
 
 class FolderCheck:
     def __init__(self):
@@ -63,15 +65,21 @@ class LoadModel:
         # Load the model
         model_dict = {
             'llama3b':'meta-llama/Llama-3.2-3B-Instruct', 
-            'tinyllama':'TinyLlama/TinyLlama-1.1B-Chat-v1.0'}
+            'tinyllama':'TinyLlama/TinyLlama-1.1B-Chat-v1.0',
+            'gemma':'google/gemma-2-9b-it',
+            'mistral':'mistralai/Mistral-7B-v0.1'}
         model_name = model_dict[model_str]
         print('Loading model: ', model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, 
             dtype=torch.bfloat16, 
-            device_map="auto"
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            # offload_folder="./offload_dir"
         )
+        # Made changes here for offload error
+        # disk_offload(model=self.model, offload_dir="./offload_dir" )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -82,6 +90,10 @@ class LoadModel:
             self.max_layer = 28
         elif model_name == 'TinyLlama/TinyLlama-1.1B-Chat-v1.0':
             self.max_layer = 22
+        elif model_name == 'google/gemma-2-9b-it':
+            self.max_layer = 43
+        elif model_name == 'mistralai/Mistral-7B-v0.1':
+            self.max_layer = 32
 
     def get_layers(self):
         return self.max_layer
@@ -114,6 +126,12 @@ class GetRecs:
                 self.age_dict = json.load(file)
         except:
             self.age_dict = None
+
+        try:
+            with open(f'output_data/{item_type}/age_binary_dict.json','r') as file:
+                self.age_binary_dict = json.load(file)
+        except:
+            self.age_binary_dict = None
 
         load_model = LoadModel(model_name)
         self.model = load_model.get_model()
@@ -152,16 +170,23 @@ class GetRecs:
             hidden_states = outputs.hidden_states
             # print('LEN hidden', len(hidden_states))
         
-            # Lookup gender
+            # Lookup demo vars
             if self.gender_dict.get(k):
                 gender = self.gender_dict[k]
             else:
                 gender = None
+
             if self.age_dict.get(k):
                 age_group = self.age_dict[k]
             else:
                 age_group = None
-            demo = dict(gender=gender, age_group=age_group)
+
+            if self.age_binary_dict.get(k):
+                age_binary = self.age_binary_dict[k]
+            else:
+                age_binary = None
+
+            demo = dict(gender=gender, age_group=age_group, age_binary=age_binary)
 
             for idx, repr in enumerate(hidden_states):
                 if idx >= (self.max_layer-15): # Might need to adjust this to the steering layer
@@ -179,7 +204,7 @@ class GetRecs:
     def get_regress_list(self, embedding_data_dict, layer_to_steer, log_reg_type='reg', demo_var='gender'):
         regress_dict = {}
         results = []
-        if demo_var == 'gender':
+        if demo_var in( 'gender', 'age_binary'):
             scorer = 'roc_auc'
         else:
             scorer = make_scorer(
@@ -201,10 +226,11 @@ class GetRecs:
                     random_state=0
                 )
 
+            # Run regression for the 2 layers before layer_to_steer
             if (key_layer >=  (layer_to_steer-2)) and (key_layer <= layer_to_steer):
             # if value[0]['hidden'] is not None:
                 # for j in value:
-                X = [j['hidden'].detach().cpu() for j in value if j['demo'][demo_var]!='Unknown']
+                X = [j['hidden'].detach().cpu() for j in value if demo_var in j['demo'] and j['demo'][demo_var]!='Unknown']
                 # print('X:  ',X)
                 X_tensor = torch.stack([
                     x.to(torch.float32)          # convert each element
@@ -215,16 +241,22 @@ class GetRecs:
 
                 X_np = X_tensor.numpy()
 
-                y = [j['demo'][demo_var] for j in value if j['demo'][demo_var] and j['demo'][demo_var]!='Unknown']
-                
+                y = [j['demo'][demo_var] for j in value if demo_var in j['demo'] and j['demo'][demo_var]!='Unknown']
+                print('SHAPES X Y: ',X_np.shape, len(y), y)
                 # Use these for multi-class
-                # le = LabelEncoder()
-                # y_enc = le.fit_transform(y)
-                
+                le = LabelEncoder()
+                if demo_var == 'age_group':
+                    y = le.fit_transform(y)
+                    print("Original unique labels:", le.classes_)
+                    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+                else:
+                    skf = 5
+                        
                 clf = clf.fit(X_np, y)
-                # print('COEF :', clf.coef_)
-                scores = cross_val_score(clf, X_np, y, cv=5, scoring=scorer)
+                    
+                scores = cross_val_score(clf, X_np, y, cv=skf, scoring=scorer)
                 results.append(np.array(scores).mean())
+                print('REGRESSION RESULTS: ', results)
                 regress_dict[key_layer] = clf
             # else:
             #     regress_list.append(clf)
@@ -262,15 +294,26 @@ class GetRecs:
             verb = 'listen to'
             noun = 'song'
         request_str = f"Please rank the following {noun}s in order from most to least likely to recommend to them to {verb} next. Only give the {noun} ranking with no other content or explanation."
-        # print('TEXT: ', prompt, request_str, candidates)
-        chat = [[{"role": "user", "content": prompt + request_str + candidate_str}]]
-        inputs = self.tokenizer.apply_chat_template(
-            chat[0],
-            add_generation_prompt=True,
-            return_tensors="pt",
-            padding=True
-        ).to(self.model.device)
-        inputs_dict = {"input_ids": inputs}
+        
+        
+        # Some models, like Mistral don't have a chat template
+        if self.tokenizer.chat_template is not None:
+            chat = [[{"role": "user", "content": prompt + request_str + candidate_str}]]
+            inputs = self.tokenizer.apply_chat_template(
+                chat[0],
+                add_generation_prompt=True,
+                return_tensors="pt",
+                padding=True
+            ).to(self.model.device)
+            inputs_dict = {"input_ids": inputs}
+        else:
+            full_prompt = prompt + request_str + candidate_str
+            inputs = self.tokenizer(
+                full_prompt,
+                return_tensors="pt",
+                padding=True
+            ).to(self.model.device)
+            inputs_dict = {"input_ids": inputs["input_ids"]}
 
         # === Run BASELINE (no steering) ===
         with torch.inference_mode(), torch.autocast("cuda"):
@@ -506,7 +549,7 @@ if __name__ == '__main__':
         inner_dict, 
         os.path.join(
             output_path,
-            f'output_dict_{args.item_type}_{size_of_sample}_withnegs_{log_reg_type}.pt'
+            f'output_dict_{args.item_type}_{size_of_sample}_withnegs_{log_reg_type}_{args.demo}_{args.layer_to_steer}.pt'
                      )
     )
     
