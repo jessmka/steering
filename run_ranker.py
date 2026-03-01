@@ -67,7 +67,8 @@ class LoadModel:
             'llama3b':'meta-llama/Llama-3.2-3B-Instruct', 
             'tinyllama':'TinyLlama/TinyLlama-1.1B-Chat-v1.0',
             'gemma':'google/gemma-2-9b-it',
-            'mistral':'mistralai/Mistral-7B-v0.1'}
+            'mistral':"mistralai/Mistral-7B-Instruct-v0.2",
+            'qwen':'Qwen/Qwen2.5-7B-Instruct'}
         model_name = model_dict[model_str]
         print('Loading model: ', model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -92,8 +93,10 @@ class LoadModel:
             self.max_layer = 22
         elif model_name == 'google/gemma-2-9b-it':
             self.max_layer = 43
-        elif model_name == 'mistralai/Mistral-7B-v0.1':
+        elif model_name == 'mistralai/Mistral-7B-Instruct-v0.2':
             self.max_layer = 32
+        elif model_name == 'Qwen/Qwen2.5-7B-Instruct':
+            self.max_layer = 28
 
     def get_layers(self):
         return self.max_layer
@@ -281,6 +284,8 @@ class GetRecs:
         Runs baseline and steered generations for a single prompt.
         Captures pre- and post-steering hidden activations from a given layer.
         """
+        random.seed(42)
+        random.shuffle(candidates)
         candidate_str = ",".join(candidates)
         # print(candidate_str)
         # === Prepare model input ===
@@ -299,21 +304,30 @@ class GetRecs:
         # Some models, like Mistral don't have a chat template
         if self.tokenizer.chat_template is not None:
             chat = [[{"role": "user", "content": prompt + request_str + candidate_str}]]
-            inputs = self.tokenizer.apply_chat_template(
+            tokenized = self.tokenizer.apply_chat_template(
                 chat[0],
                 add_generation_prompt=True,
                 return_tensors="pt",
                 padding=True
             ).to(self.model.device)
+            # Normalize: ensure `inputs` is the tensor of input ids
+            if isinstance(tokenized, dict) or hasattr(tokenized, "get"):
+                input_ids = tokenized.get("input_ids", None)
+            else:
+                input_ids = tokenized
+            # if tokenizers returns a BatchEncoding-like object, it should contain a tensor
+            inputs = input_ids
             inputs_dict = {"input_ids": inputs}
         else:
-            full_prompt = prompt + request_str + candidate_str
-            inputs = self.tokenizer(
+            full_prompt = f"<s>[INST] {prompt + request_str + candidate_str} [/INST]"
+            tokenized = self.tokenizer(
                 full_prompt,
                 return_tensors="pt",
                 padding=True
             ).to(self.model.device)
-            inputs_dict = {"input_ids": inputs["input_ids"]}
+            # Standard tokenizer returns a dict-like with 'input_ids' tensor
+            inputs = tokenized["input_ids"]
+            inputs_dict = {"input_ids": inputs}
 
         # === Run BASELINE (no steering) ===
         with torch.inference_mode(), torch.autocast("cuda"):
@@ -549,7 +563,7 @@ if __name__ == '__main__':
         inner_dict, 
         os.path.join(
             output_path,
-            f'output_dict_{args.item_type}_{size_of_sample}_withnegs_{log_reg_type}_{args.demo}_{args.layer_to_steer}.pt'
+            f'output_dict_{args.item_type}_{size_of_sample}_withnegs_{log_reg_type}_{args.demo}_{args.layer_to_steer}_{args.model_name}.pt'
                      )
     )
     
