@@ -176,11 +176,11 @@ class Regression:
                     
                 scores = cross_val_score(clf, X_np, y, cv=skf, scoring=scorer)
                 results.append(np.array(scores).mean())
-                print('REGRESSION RESULTS: ', results)
+                
                 regress_dict[key_layer] = clf
             # else:
             #     regress_list.append(clf)
-
+        print('REGRESSION RESULTS: ', results)
         return regress_dict, results
     
     def steering_weights(self):
@@ -210,6 +210,8 @@ class Steering:
         results = []
         
         base_prompt = f"User history: {history}. Recommended movie:"
+        # base_prompt = f"User history: {history}. Please don't take my gender into account and recommend a movie to watch next:"
+        # base_prompt = f"User history of liked movies: {history}. Please rank the following movies: {candidates} from most to least likely to watch next: "
         
         for movie in candidates:
             full_text = f"{base_prompt} {movie}"
@@ -250,7 +252,7 @@ class Steering:
         # Sort results: Higher (less negative) is better
         return sorted(results, key=lambda x: x[1], reverse=True)
     
-    def ranker_steered(self, history, candidates, W_dict,layer_to_steer,alpha=20):
+    def ranker_steered(self, history, candidates, W_dict,layer_to_steer,alpha=1):
         scores = []
         # layer_to_steer = 16
 
@@ -421,7 +423,7 @@ if __name__=="__main__":
     else:
         app_data = LoadData(args.item_type, args.model_name, sample=args.sample) # Only use sample for testing
         ndcg_calc = NDCGCalc(app_data)
-        with open(f'output_data/{args.item_type}/logit_outputs/output_{mode}_{args.model_name}_{args.layer_to_steer}_{args.alpha}.json', 'r', encoding='utf-8') as file:
+        with open(f'output_data/{args.item_type}/logit_outputs/output_{mode}_{args.model_name}_{args.layer_to_steer}_{args.alpha}_newp.json', 'r', encoding='utf-8') as file:
         # Use json.load() to deserialize the file's content
             rank_results = json.load(file)
 
@@ -430,7 +432,7 @@ if __name__=="__main__":
     ndcg_results = ndcg_calc.calc_ndcg_results(rank_results)
 
     # Save data
-    filename = f'output_data/{args.item_type}/logit_outputs/{mode}_ndcg_{args.model_name}_{args.layer_to_steer}_{args.alpha}.json'
+    filename = f'output_data/{args.item_type}/logit_outputs/{mode}_ndcg_{args.model_name}_{args.layer_to_steer}_{args.alpha}_newp2.json'
     with open(filename, 'w') as json_file:
         json.dump(ndcg_results, json_file, indent=4)
     
